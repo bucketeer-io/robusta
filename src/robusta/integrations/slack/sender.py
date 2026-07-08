@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 import ssl
 import tempfile
@@ -577,10 +578,12 @@ class SlackSender:
 
         text = "*AI used info from alert and the following tools:*"
         for tool in tool_calls:
-            file_response = self.slack_client.files_upload_v2(content=tool.result, title=f"{tool.description}")
+            content = tool.result if isinstance(tool.result, str) else json.dumps(tool.result, indent=2)
+            file_response = self.slack_client.files_upload_v2(content=content, title=f"{tool.description}")
             permalink = file_response["file"]["permalink"]
             text += f"\n• `<{permalink}|{tool.description}>`"
 
+        text = Transformer.apply_length_limit_to_markdown(text, MAX_BLOCK_CHARS)
         self.slack_client.chat_postMessage(
             channel=slack_channel,
             thread_ts=parent_thread,
@@ -618,29 +621,30 @@ class SlackSender:
             return
 
         ai_result = ai_analysis_blocks[0].holmes_result
+        analysis_text = f":robot_face: {ai_result.analysis}"
 
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f":robot_face: {ai_result.analysis}",
-                },
-            }
-        ]
+        # Slack Block Kit text fields are capped at MAX_BLOCK_CHARS. Long analyses are
+        # posted as a file attachment in the same thread so nothing is truncated.
+        analysis_too_long = len(analysis_text) > MAX_BLOCK_CHARS
+        if analysis_too_long:
+            block_text = ":robot_face: _Analysis attached as file (too long for inline display)._"
+        else:
+            block_text = analysis_text
 
         try:
-            if thread_ts:
-                kwargs = {"thread_ts": thread_ts}
-            else:
-                kwargs = {}
+            kwargs = {"thread_ts": thread_ts} if thread_ts else {}
             resp = self.slack_client.chat_postMessage(
                 channel=slack_channel,
                 text=title,
                 attachments=[
                     {
                         "color": "#c852ff",  # AI purple
-                        "blocks": blocks,
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {"type": "mrkdwn", "text": block_text},
+                            }
+                        ],
                     }
                 ],
                 display_as_bot=True,
@@ -648,10 +652,19 @@ class SlackSender:
                 unfurl_media=False,
                 **kwargs,
             )
-            # We will need channel ids for future message updates
             self.channel_name_to_id[slack_channel] = resp["channel"]
+            channel_id = resp["channel"]
             if not thread_ts:  # if we're not in a threaded message, get the new message thread id
                 thread_ts = resp["ts"]
+
+            if analysis_too_long:
+                self.slack_client.files_upload_v2(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    content=ai_result.analysis,
+                    filename="holmes-analysis.md",
+                    title=finding.title,
+                )
 
             self.__send_tool_usage(thread_ts, slack_channel, ai_result.tool_calls)
 

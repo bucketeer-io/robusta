@@ -1,5 +1,7 @@
 # Build stage
-FROM python:3.11-slim as builder
+# ENV_TYPE is provided at build time (see Makefile); defaults to PRODUCTION.
+ARG ENV_TYPE=PRODUCTION
+FROM python:3.11.15-slim AS builder
 ENV PATH="/root/.local/bin/:$PATH"
 
 RUN apt-get update \
@@ -13,7 +15,8 @@ WORKDIR /app
 
 RUN curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key -o /app/Release.key
 
-ENV ENV_TYPE=DEV
+ARG ENV_TYPE
+ENV ENV_TYPE=${ENV_TYPE}
 
 # Create and activate virtual environment
 RUN python -m venv /app/venv --upgrade-deps && \
@@ -56,10 +59,14 @@ RUN find "/app/venv/lib/python3.11/site-packages/kubernetes/client/models/" -typ
 RUN find "/app/venv/lib/python3.11/site-packages/kubernetes/client/models/" -type f -print0 | xargs -0 sed -i 's/local_vars_configuration = Configuration()/local_vars_configuration = Configuration.get_default()/g'
 
 # Final stage
-FROM python:3.11-slim
+FROM python:3.11.15-slim
 
-
-ENV ENV_TYPE=DEV
+ARG ENV_TYPE=PRODUCTION
+ENV ENV_TYPE=${ENV_TYPE}
+# RUNNER_VERSION is read at runtime (defaults to "unknown"); baked in so the
+# built image reports its own version. Provided at build time via the Makefile.
+ARG RUNNER_VERSION=unknown
+ENV RUNNER_VERSION=${RUNNER_VERSION}
 ENV PYTHONUNBUFFERED=1
 ENV VIRTUAL_ENV=/app/venv
 ENV PATH="/venv/bin:$PATH"
